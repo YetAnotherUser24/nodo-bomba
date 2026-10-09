@@ -37,7 +37,12 @@ public:
   explicit VirtualEncoder(VirtualActuator& act) : _act(act) {}
   void init() override {}
   void tick(uint32_t nowMs) override { _act.tick(nowMs); }
-  uint16_t readRawAngle() override { return _act.angle(); }
+  uint16_t readRawAngle() override {
+    // The real AS5600 is sampled on demand, so the model must advance here too
+    // (the node only calls readRawAngle(), never tick()).
+    _act.tick(millis());
+    return _act.angle();
+  }
 
 private:
   VirtualActuator& _act;
