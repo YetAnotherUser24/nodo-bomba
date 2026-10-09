@@ -1,15 +1,29 @@
-# PlatformIO Build Directory
+# Build de PlatformIO: se regenera y contiene rutas absolutas de la maquina que lo compilo.
 .pio/
+.pioenvs/
+.piolibdeps/
 
-# IDE files
+# IDE
 .vscode/
 .idea/
 
-# Scratch & temporary test scripts
-scratch/
+# Artefactos de compilacion
+*.o
+*.a
+*.d
+*.out
+*.exe
+*.bin
+*.elf
+*.hex
+*.map
+
+# Copias de seguridad y temporales
 *.bak
 *.tmp
+*~
+*.swp
 
-# OS files
+# Sistema
 .DS_Store
 Thumbs.db

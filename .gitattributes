@@ -1,0 +1,38 @@
+# Normalizacion de finales de linea.
+#
+# Regla base: los archivos de texto se guardan con LF en el repositorio y se
+# extraen con LF en CUALQUIER plataforma. Sin esto el comportamiento depende de
+# la configuracion de cada maquina (Git for Windows instala core.autocrlf=true
+# por defecto), de modo que el mismo archivo puede llegar con CRLF a un Linux y
+# romper los scripts: un shebang con \r falla con "bad interpreter".
+* text=auto eol=lf
+
+# Scripts: siempre LF.
+*.sh   text eol=lf
+*.bash text eol=lf
+*.py   text eol=lf
+*.m    text eol=lf
+*.pl   text eol=lf
+
+# Scripts de Windows: necesitan CRLF para funcionar.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binarios: git no los toca, ni convierte ni intenta fusionarlos.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.zip  binary
+*.7z   binary
+*.bin  binary
+*.elf  binary
+*.hex  text eol=lf
+*.exe  binary
+*.dll  binary
+*.so   binary
+*.a    binary
+*.mat  binary
+*.xlsx binary
+*.docx binary
