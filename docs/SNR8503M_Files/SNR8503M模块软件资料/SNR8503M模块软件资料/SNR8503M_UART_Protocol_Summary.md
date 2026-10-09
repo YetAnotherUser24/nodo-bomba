@@ -109,7 +109,7 @@ AA 00 64 C3 50 00 00 21 55
 
 ## 6. Archivos de Referencia en el Proyecto
 
-* [`UR_Ctrl.c`](file:///c:/Users/Sam/Downloads/SNR8503M模块软件资料/SNR8503M模块软件资料/无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Kernal_Source/UR_Ctrl.c#L141-L260) - Implementación de `UartDealRX()` y `UartDealTX()`.
-* [`UR_Ctrl.h`](file:///c:/Users/Sam/Downloads/SNR8503M模块软件资料/SNR8503M模块软件资料/无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Include/UR_Ctrl.h) - Estructura de buffer en anillo y prototipos.
-* [`MC_Parameter.h`](file:///c:/Users/Sam/Downloads/SNR8503M模块软件资料/SNR8503M模块软件资料/无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Include/MC_Parameter.h) - Definición del BaudRate (9600).
-* [`Global_Variable.h`](file:///c:/Users/Sam/Downloads/SNR8503M模块软件资料/SNR8503M模块软件资料/无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Include/Global_Variable.h) - Declaración de bits de error y variables globales.
+* [`UR_Ctrl.c`](无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Kernal_Source/UR_Ctrl.c#L141-L260) - Implementación de `UartDealRX()` y `UartDealTX()`.
+* [`UR_Ctrl.h`](无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Include/UR_Ctrl.h) - Estructura de buffer en anillo y prototipos.
+* [`MC_Parameter.h`](无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Include/MC_Parameter.h) - Definición del BaudRate (9600).
+* [`Global_Variable.h`](无感/SDK/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/SNR8503M_BLDC_SNLS_LIB_V33_RELEASE_230418/Include/Global_Variable.h) - Declaración de bits de error y variables globales.

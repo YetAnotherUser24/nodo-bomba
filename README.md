@@ -1,5 +1,7 @@
 # Nodo bomba — Dosificación peristáltica (`nodo-bomba`)
 
+> **Repositorio:** [github.com/YetAnotherUser24/nodo-bomba](https://github.com/YetAnotherUser24/nodo-bomba)
+
 Nodo de dosificación volumétrica de la Planta 1. Inyecta la disolución madre de **sulfito de sodio**
 ($Na_2SO_3$, 100 g/L) que provoca la caída controlada del oxígeno disuelto, e informa el volumen
 **realmente** inyectado para que el dashboard pueda graficar la perturbación en el instante correcto.
