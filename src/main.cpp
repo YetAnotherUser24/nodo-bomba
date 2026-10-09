@@ -25,6 +25,12 @@
 #include <esp_task_wdt.h>
 #include <sys/time.h>
 #include "config.h"
+#include "pump_bus.h"
+
+// Hardware is reached exclusively through the injected bus. Real builds bind it to LEDC PWM +
+// the AS5600; virtual builds bind it to a duty->flow + encoder model. The dosing loop is identical.
+static IPwmActuator& pumpActuatorRef = pumpActuator();
+static IRotaryEncoder& pumpEncoderRef = pumpEncoder();
 
 #if defined(OTA_ENABLED) && OTA_ENABLED
 #include <ArduinoOTA.h>
@@ -82,21 +88,14 @@ static PumpState getCommand() {
 
 /* ------------------------- Encoder AS5600 -------------------------- */
 static uint16_t readRawAngle(uint16_t fallback) {
-  Wire.beginTransmission(AS5600_ADDR);
-  Wire.write(AS5600_RAW_ANGLE_REG);
-  if (Wire.endTransmission(false) != 0) return fallback;
-  if (Wire.requestFrom(AS5600_ADDR, 2) != 2) return fallback;
-  uint16_t hi = Wire.read();
-  uint16_t lo = Wire.read();
-  return ((hi & 0x0F) << 8) | lo; // 12-bit
+  const uint16_t raw = pumpEncoderRef.readRawAngle();
+  (void)fallback;
+  return raw;
 }
 
 /* ---------------------------- Actuador ----------------------------- */
 static void applyDuty(float percent) {
-  percent = constrain(percent, 0.0f, 100.0f);
-  uint32_t maxDuty = (1u << PUMP_PWM_RES_BITS) - 1u;
-  uint32_t duty = (uint32_t)((percent / 100.0f) * maxDuty);
-  ledcWrite(PUMP_PWM_CHANNEL, duty);
+  pumpActuatorRef.setDutyPercent(percent);
 }
 
 /* --------------------------- Core 1 lazo --------------------------- */
@@ -416,9 +415,9 @@ void setup() {
   Serial.println("\n=== AquaControl: Bomba Dosificadora Peristáltica (Planta 1) ===");
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  pumpEncoderRef.init();
 
-  ledcSetup(PUMP_PWM_CHANNEL, PUMP_PWM_FREQ_HZ, PUMP_PWM_RES_BITS);
-  ledcAttachPin(PUMP_PWM_PIN, PUMP_PWM_CHANNEL);
+  pumpActuatorRef.init();
   applyDuty(0.0f);
 
   uint16_t probe = readRawAngle(0);
