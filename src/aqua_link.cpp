@@ -19,6 +19,7 @@
 #include <WiFi.h>
 #include <esp_random.h>
 #include <sys/time.h>
+#include <ArduinoJson.h>
 
 #include "aqua_protocol.h"
 
@@ -108,10 +109,55 @@ static void publishPresence(bool online, const char* reason) {
 
 /* ------------------------------ Inbound -------------------------------- */
 
+/**
+ * Has this command's deadline already passed?
+ *
+ * The gateway stamps `deadline_ms` when it issues a command, and nothing on the device ever
+ * read it. A command that arrived late -- queued while the session was down, or redelivered --
+ * was carried out exactly as if it had just been requested. An operator's intent expires, and
+ * acting after it does is not neutral: it moves a pump for a reason nobody is waiting on.
+ *
+ * Enforced here rather than in the handler, so all four nodes behave the same.
+ *
+ * Skipped outright when the device clock is not anchored (before 2020). Comparing an epoch
+ * deadline against an unanchored clock would reject *every* command, which is a worse failure
+ * than the one being fixed.
+ *
+ * @return true when the command is stale and must not be applied
+ */
+static bool commandExpired(const char* payload, size_t length) {
+  // 768, not 256. The command envelope is ~230 bytes with a nested `target`, and a document
+  // too small to hold it does not truncate -- it fails to parse. That failure used to return
+  // false here, which silently disabled the whole check while every layer still looked right.
+  // A probe that cannot read the deadline must say so rather than pretend there isn't one.
+  StaticJsonDocument<768> probe;
+  const DeserializationError err = deserializeJson(probe, payload, length);
+  if (err) {
+    Serial.printf("[AQUA] deadline probe could not parse (%s); applying\n", err.c_str());
+    return false;
+  }
+  if (!probe["deadline_ms"].is<long long>()) return false;
+
+  const long long deadlineMs = probe["deadline_ms"].as<long long>();
+  if (deadlineMs <= 0) return false;  // no deadline to enforce
+
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  const long long nowMs = (long long)tv.tv_sec * 1000LL + (long long)(tv.tv_usec / 1000);
+  if (nowMs < (long long)kPlausibleEpochS * 1000LL) return false;
+  if (nowMs <= deadlineMs) return false;
+
+  const char* cmdId = probe["cmd_id"].is<const char*>() ? probe["cmd_id"].as<const char*>() : "";
+  Serial.printf("[AQUA] command %s expired %lld ms ago; rejected\n", cmdId, nowMs - deadlineMs);
+  if (cmdId[0] != '\0') aquaLinkAck(cmdId, false, 0.0f);
+  return true;
+}
+
 static void onMessage(char* topic, uint8_t* payload, unsigned int length) {
   (void)topic;
   // Not NUL-terminated by contract. `pumpHandleMqttCommand` is given the length and must
   // use it; treating this as a C string would read past the end of the buffer.
+  if (commandExpired((const char*)payload, (size_t)length)) return;
   pumpHandleMqttCommand((const char*)payload, (size_t)length);
 }
 
