@@ -26,6 +26,8 @@
 #include <sys/time.h>
 #include "config.h"
 #include "pump_bus.h"
+#include "pump_state.h"
+#include "aqua_link.h"
 
 // Hardware is reached exclusively through the injected bus. Real builds bind it to LEDC PWM +
 // the AS5600; virtual builds bind it to a duty->flow + encoder model. The dosing loop is identical.
@@ -42,19 +44,10 @@ static volatile bool otaInProgress = false;
 #define AS5600_RAW_ANGLE_REG 0x0C
 #define AS5600_TICKS_PER_REV 4096.0f
 
-/* --------------------------- Estado -------------------------------- */
-enum PumpMode : uint8_t { PUMP_IDLE = 0, PUMP_DOSE = 1, PUMP_MANUAL_ON = 2 };
-
-struct PumpState {
-  float dosed_ml;
-  float target_ml;
-  float rpm;
-  float duty_percent;
-  uint8_t mode;
-  uint32_t status_code;
-  bool dose_completed;
-  bool dose_timed_out;
-};
+/* --------------------------- Estado ------------------------------------ */
+// `enum PumpMode` and `struct PumpState` now live in pump_state.h: this file is its own
+// translation unit (build_src_filter names sources explicitly), so the cloud transport
+// had no way to see a type it needs to send.
 
 static PumpState s_state;               // Core 1 -> Core 0
 static portMUX_TYPE s_stateMux = portMUX_INITIALIZER_UNLOCKED;
@@ -169,6 +162,12 @@ static uint64_t currentRtcMs() {
 }
 
 static void postPumpEvent(const char* eventType, float volumeMl, float targetMl, const char* status) {
+#if AQUA_TRANSPORT_MQTT
+  // Events go out immediately rather than through the sample queue: they are sparse, and a
+  // dose-complete arriving seconds late behind a batch of idle heartbeats defeats the point.
+  aquaLinkEvent(eventType, volumeMl, targetMl, status);
+  return;
+#endif
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -194,6 +193,11 @@ static void postPumpEvent(const char* eventType, float volumeMl, float targetMl,
 }
 
 static void acknowledge(const String& cmdId, bool success, float speedPercent) {
+#if AQUA_TRANSPORT_MQTT
+  // `speedPercent` is the duty in force. The name is legacy; only the value is passed on.
+  aquaLinkAck(cmdId.c_str(), success, speedPercent);
+  return;
+#else
   if (cmdId.length() == 0) return;
   WiFiClientSecure client;
   client.setInsecure();
@@ -215,10 +219,16 @@ static void acknowledge(const String& cmdId, bool success, float speedPercent) {
   int code = http.POST(body);
   Serial.printf("[Cloud] ACK %s -> HTTP %d\n", cmdId.c_str(), code);
   http.end();
+#endif
 }
 
 static void postTelemetry() {
   PumpState st = getState();
+#if AQUA_TRANSPORT_MQTT
+  aquaLinkQueue(st);
+  aquaLinkFlush();
+  return;
+#else
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -251,7 +261,152 @@ static void postTelemetry() {
     Serial.printf("[Cloud] Telemetry POST error %d: %s\n", code, http.errorToString(code).c_str());
   }
   http.end();
+#endif
 }
+
+/* --------------------------- Commands ------------------------------ */
+
+/**
+ * Set when the end of a dose has been reported, cleared when a new dose starts.
+ *
+ * File scope rather than a local of the cloud task, because `applyCommand` — which clears
+ * it — now lives outside that function. Only the core-0 cloud task touches it, so this is
+ * not new cross-core state.
+ */
+static bool doseEndReported = true;
+
+/**
+ * Apply one command. **The single copy of the dosing semantics.**
+ *
+ * Both the legacy HTTP poll and the MQTT subscription funnel through here. The legacy
+ * envelope nested its arguments under `command:{id, command_type, payload:{...}}`; the v2
+ * message puts them at `cmd_id`, `action` and `target`. Translating at the edges is cheap.
+ * Keeping two copies of what a `dose` means is not: a divergence between them would
+ * silently dose the tank while both looked correct on their own.
+ *
+ * @param cmdId  echoed in the ack, so the gateway can settle the outbox row
+ * @param action the operational verb: emergency_stop, stop, force_off, dose, force_on,
+ *               set_state. An unknown verb is acknowledged as rejected, not ignored.
+ * @param target the action's arguments
+ */
+static void applyCommand(const String& cmdId, const String& action, JsonObjectConst target) {
+  PumpState cmd = getCommand();
+  bool handled = false;
+  if (action == "emergency_stop" || action == "stop" || action == "force_off") {
+    cmd.mode = PUMP_IDLE;
+    setCommand(cmd);
+    applyDuty(0.0f);
+    handled = true;
+    Serial.println("[Cmd] Pump STOP");
+  } else if (action == "dose") {
+    float targetMl = 0.0f;
+    if (target["target_ml"].is<float>()) targetMl = target["target_ml"].as<float>();
+    else if (target["volume_ml"].is<float>()) targetMl = target["volume_ml"].as<float>();
+    else if (target["target_volume_ml"].is<float>()) targetMl = target["target_volume_ml"].as<float>();
+    if (targetMl > 0.0f) {
+      PumpState zero = getState();
+      zero.dosed_ml = 0.0f;
+      zero.dose_completed = false;
+      zero.dose_timed_out = false;
+      zero.status_code = 0;
+      setState(zero);
+      cmd.mode = PUMP_DOSE;
+      cmd.target_ml = targetMl;
+      setCommand(cmd);
+      doseEndReported = false;
+      handled = true;
+      Serial.printf("[Cmd] Dosing %.2f mL\n", targetMl);
+      postPumpEvent("dose_started", 0.0f, targetMl, "ok");
+    }
+  } else if (action == "force_on") {
+    cmd.mode = PUMP_MANUAL_ON;
+    setCommand(cmd);
+    handled = true;
+    Serial.println("[Cmd] Pump FORCE ON");
+  } else if (action == "stop_experiment") {
+    // The pump keeps no experiment state of its own, so "end the experiment" can only mean
+    // "stop dosing" -- but it has to be *accepted*. Rejecting it would make an end-of-run
+    // transition look like it failed on this role and nowhere else, which reads as a broken
+    // node rather than a pump with nothing to stop. The attribution this node does keep is
+    // cleared by the adapter, so a rejection would also report the opposite of what happened.
+    cmd.mode = PUMP_IDLE;
+    setCommand(cmd);
+    applyDuty(0.0f);
+    handled = true;
+    Serial.println("[Cmd] Pump STOP (experiment end)");
+  } else if (action == "set_state") {
+    String s = target["state"].is<const char*>() ? target["state"].as<String>() : String("");
+    // MANUAL_OVERRIDE belongs with IDLE, not apart from it: in both the pump stops dosing
+    // under its own control and the operator drives it directly. Rejecting it would mean the
+    // orchestrator's transition to manual mode failed on this role and nowhere else, which
+    // reads as a broken node rather than a missing branch.
+    if (s == "IDLE" || s == "ACTIVE_EXPERIMENT" || s == "MANUAL_OVERRIDE") {
+      cmd.mode = PUMP_IDLE;
+      setCommand(cmd);
+      applyDuty(0.0f);
+      handled = true;
+    }
+  }
+
+  float speed = getState().duty_percent;
+  acknowledge(cmdId, handled, speed);
+}
+
+
+#if AQUA_TRANSPORT_MQTT
+/**
+ * Translate a schema-v2 command and hand it to the shared applier.
+ *
+ * The v2 message carries `cmd_id`, `action` and `target`. The legacy envelope nested the
+ * same information under `command:{id, command_type, payload:{...}}`. Only the shape
+ * differs, so this reshapes rather than re-deciding anything — `applyCommand` remains the
+ * one place that knows what a dose is.
+ *
+ * A command with no action is dropped rather than acknowledged: there is nothing to
+ * carry out, and acking it would tell the gateway the node acted on an empty verb.
+ */
+void pumpHandleMqttCommand(const char* payload, size_t length) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload, length) != DeserializationError::Ok) {
+    Serial.println("[AQUA] command payload was not valid JSON; ignored");
+    return;
+  }
+
+  String cmdId = doc["cmd_id"].is<const char*>() ? doc["cmd_id"].as<String>() : String("");
+  String action = doc["action"].is<const char*>() ? doc["action"].as<String>() : String("");
+  if (action.length() == 0) {
+    Serial.println("[AQUA] command had no action; ignored");
+    return;
+  }
+
+  JsonObjectConst target =
+      doc["target"].is<JsonObjectConst>() ? doc["target"].as<JsonObjectConst>() : JsonObjectConst();
+
+  const char* exp = doc["exp"].is<const char*>() ? doc["exp"].as<const char*>() : nullptr;
+
+  // Attribution follows the command, because the pump has no run state of its own: the v2
+  // message carries the experiment at the envelope level and nothing else on this node has
+  // ever known about it. Without this every dose is recorded against no experiment, and a
+  // dose is a physical act with a volume attached -- the one thing that cannot be
+  // reconstructed after the fact.
+  //
+  // Clearing is explicit and only on the actions that end a run. A `dose` arriving without an
+  // id mid-run must *keep* the current one: clearing on every unnamed command would drop the
+  // attribution of exactly the doses that matter, since a UI sending a dose has no reason to
+  // repeat the experiment id it already started.
+  const String stateArg = target["state"].is<const char*>() ? target["state"].as<String>() : String("");
+  const bool endsRun = action == "stop_experiment" ||
+                       (action == "set_state" && stateArg != "ACTIVE_EXPERIMENT" &&
+                        stateArg != "");
+  if (endsRun) {
+    aquaLinkSetExperiment(nullptr);
+  } else if (exp != nullptr && exp[0] != '\0') {
+    aquaLinkSetExperiment(exp);
+  }
+
+  applyCommand(cmdId, action, target);
+}
+#endif
 
 static void cloudWorkerTask(void* param) {
   (void)param;
@@ -265,7 +420,6 @@ static void cloudWorkerTask(void* param) {
   unsigned long lastWifiRetry = millis();
   bool wasConnected = false;
   bool otaConfigured = false;
-  bool doseEndReported = true;
 
   while (true) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -310,6 +464,14 @@ static void cloudWorkerTask(void* param) {
 
     unsigned long now = millis();
 
+#if AQUA_TRANSPORT_MQTT
+    // Serviced here rather than at the top of the loop: this task `continue`s before this
+    // point while WiFi is down, and there is no point driving an MQTT client without a
+    // network. This is also the only task that touches the transport, which is what the
+    // module's thread-safety contract requires.
+    aquaLinkLoop();
+#endif
+
     // 1. Detección de fin de dosis -> evento pump_completed / fault
     PumpState st = getState();
     if (st.mode == PUMP_IDLE && (st.dose_completed || st.dose_timed_out) && !doseEndReported) {
@@ -329,7 +491,11 @@ static void cloudWorkerTask(void* param) {
       postTelemetry();
     }
 
+#if !AQUA_TRANSPORT_MQTT
     // 3. Polling de comandos
+    // Once MQTT is on, commands are pushed and this 1 Hz GET is pure cost — on the aerator
+    // the same poll was ~77% of the node's traffic and almost every response was
+    // `has_node: false`.
     if (now - lastPoll >= COMMAND_POLL_INTERVAL_MS) {
       lastPoll = now;
       WiFiClientSecure client;
@@ -351,51 +517,8 @@ static void cloudWorkerTask(void* param) {
               action = cmdObj["payload"]["action"].as<String>();
             }
 
-            PumpState cmd = getCommand();
-            bool handled = false;
-            if (cmdType == "emergency_stop" || cmdType == "stop" || action == "force_off" || action == "stop") {
-              cmd.mode = PUMP_IDLE;
-              setCommand(cmd);
-              applyDuty(0.0f);
-              handled = true;
-              Serial.println("[Cmd] Pump STOP");
-            } else if (action == "dose") {
-              float targetMl = 0.0f;
-              if (cmdObj["payload"]["target_ml"].is<float>()) targetMl = cmdObj["payload"]["target_ml"].as<float>();
-              else if (cmdObj["payload"]["volume_ml"].is<float>()) targetMl = cmdObj["payload"]["volume_ml"].as<float>();
-              else if (cmdObj["payload"]["target_volume_ml"].is<float>()) targetMl = cmdObj["payload"]["target_volume_ml"].as<float>();
-              if (targetMl > 0.0f) {
-                PumpState zero = getState();
-                zero.dosed_ml = 0.0f;
-                zero.dose_completed = false;
-                zero.dose_timed_out = false;
-                zero.status_code = 0;
-                setState(zero);
-                cmd.mode = PUMP_DOSE;
-                cmd.target_ml = targetMl;
-                setCommand(cmd);
-                doseEndReported = false;
-                handled = true;
-                Serial.printf("[Cmd] Dosing %.2f mL\n", targetMl);
-                postPumpEvent("dose_started", 0.0f, targetMl, "ok");
-              }
-            } else if (action == "force_on") {
-              cmd.mode = PUMP_MANUAL_ON;
-              setCommand(cmd);
-              handled = true;
-              Serial.println("[Cmd] Pump FORCE ON");
-            } else if (action == "set_state") {
-              String s = cmdObj["payload"]["state"].is<const char*>() ? cmdObj["payload"]["state"].as<String>() : String("");
-              if (s == "IDLE" || s == "ACTIVE_EXPERIMENT") {
-                cmd.mode = PUMP_IDLE;
-                setCommand(cmd);
-                applyDuty(0.0f);
-                handled = true;
-              }
-            }
-
-            float speed = getState().duty_percent;
-            acknowledge(cmdId, handled, speed);
+            applyCommand(cmdId, action, cmdObj["payload"].is<JsonObjectConst>()
+                              ? cmdObj["payload"].as<JsonObjectConst>() : JsonObjectConst());
           }
         } else if (code > 0) {
           Serial.printf("[Cloud] Poll HTTP %d\n", code);
@@ -403,6 +526,7 @@ static void cloudWorkerTask(void* param) {
         http.end();
       }
     }
+#endif  // !AQUA_TRANSPORT_MQTT
 
     vTaskDelay(pdMS_TO_TICKS(50));
   }
@@ -413,6 +537,31 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== AquaControl: Bomba Dosificadora Peristáltica (Planta 1) ===");
+
+  // Task watchdog: 60 s, trigger_panic, matching the sensor node's deliberate choice.
+  //
+  // Without this the Arduino default applies -- 5 s, with the idle tasks on the watch list --
+  // and `PubSubClient::connect` busy-waits for a CONNACK using a 15 s socket timeout. A
+  // broker that accepts the TCP connection and then answers nothing therefore starves core
+  // 0's idle task (the cloud task is pinned there) and the node resets. Measured on the
+  // bench: `rst:0xc (RTC_SW_CPU_RST)` twice, ten seconds apart, across a 50 s outage, with
+  // the sequence counter restarting each time.
+  //
+  // That is not a cosmetic reboot. Store-and-forward keeps the pending batch in RAM, so a
+  // reset discards it -- and an outage is exactly when the batch is worth keeping. 60 s is
+  // comfortably above the 15 s library timeout and still recovers a genuine hang.
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
+  esp_task_wdt_config_t wdt_config = {
+      .timeout_ms = 60000,
+      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+      .trigger_panic = true,
+  };
+  esp_task_wdt_reconfigure(&wdt_config);
+  esp_task_wdt_add(NULL);
+#else
+  esp_task_wdt_init(60, true);
+  esp_task_wdt_add(NULL);
+#endif
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   pumpEncoderRef.init();
