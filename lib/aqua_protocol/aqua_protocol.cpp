@@ -96,6 +96,26 @@ const char* timeSourceName(TimeSource source) {
   return index < 4 ? kTimeSourceNames[index] : "monotonic";
 }
 
+bool plausibleEpochMs(long long unixMs) {
+  return unixMs >= static_cast<long long>(kPlausibleEpochS) * 1000LL;
+}
+
+uint64_t extrapolateEpochMs(uint64_t anchorMs, uint32_t anchorAtMs, uint32_t nowMs) {
+  // Unsigned subtraction on the uptime difference, so the wrap at 2^32 yields the elapsed time
+  // rather than a negative age. The node is expected to run for weeks; 49.7 days is reachable.
+  const uint32_t elapsed = static_cast<uint32_t>(nowMs - anchorAtMs);
+  return anchorMs + static_cast<uint64_t>(elapsed);
+}
+
+bool deadlinePassed(long long deadlineMs, uint64_t nowMs) {
+  if (deadlineMs <= 0) return false;  // no deadline to enforce
+  // An unanchored clock is not a stale clock. Asking for plausibility rather than for zero keeps
+  // that judgement in one place: a caller that hands over a 1970 reading in any form gets "cannot
+  // judge" instead of a comparison it happens to lose.
+  if (!plausibleEpochMs(static_cast<long long>(nowMs))) return false;
+  return static_cast<long long>(nowMs) > deadlineMs;
+}
+
 // ---------------------------------------------------------------------------
 // Topics
 // ---------------------------------------------------------------------------

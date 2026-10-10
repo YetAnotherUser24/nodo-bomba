@@ -32,11 +32,15 @@
  * The pump has no RTC. Its only clock is SNTP, which is why the legacy code guarded its
  * timestamps with `tv_sec < 1600000000` and sent `millis()` when that failed.
  *
- * Schema v2 makes the ambiguity explicit via `t_src` rather than guessing, so the
- * pre-2020 case is reported as `monotonic` — a value that is honest about being relative
- * — instead of an epoch number that decodes to 1970 and looks like a real instant.
+ * Schema v2 makes the ambiguity explicit via `t_src` rather than guessing, so the pre-2020 case
+ * is reported as `monotonic` -- a value that is honest about being relative -- instead of an
+ * epoch number that decodes to 1970 and looks like a real instant.
+ *
+ * The threshold is now the shared `aqua::kPlausibleEpochS` (2020-01-01). This node used to
+ * declare its own copy at 1600000000 -- 2020-09-13 -- so a clock reading 2020-05-01 was reported
+ * `monotonic` here and `ntp` on the other three, while the comment above described the pre-2020
+ * case that the code was not actually implementing.
  */
-static constexpr uint64_t kPlausibleEpochS = 1600000000ULL;
 
 static uint64_t nowUnixMs() {
   struct timeval tv;
@@ -61,13 +65,13 @@ aqua::TimeSource s_broadcastSource = aqua::TimeSource::Monotonic;
 /** Best-known epoch ms, or 0 when nothing is anchored. */
 uint64_t aquaLinkNowMs() {
   const uint64_t local = nowUnixMs();
-  if (local >= kPlausibleEpochS * 1000ULL) return local;
-  if (s_haveBroadcast) return s_broadcastMs + (uint64_t)(millis() - s_broadcastAtMs);
+  if (local >= aqua::kPlausibleEpochS * 1000ULL) return local;
+  if (s_haveBroadcast) return aqua::extrapolateEpochMs(s_broadcastMs, s_broadcastAtMs, millis());
   return 0;
 }
 
 static aqua::TimeSource timeSourceNow() {
-  if (nowUnixMs() >= kPlausibleEpochS * 1000ULL) return aqua::TimeSource::Ntp;
+  if (nowUnixMs() >= aqua::kPlausibleEpochS * 1000ULL) return aqua::TimeSource::Ntp;
   if (s_haveBroadcast) return s_broadcastSource;
   return aqua::TimeSource::Monotonic;
 }
@@ -79,7 +83,7 @@ static void acceptTimeBroadcast(const char* payload, size_t length) {
   if (!doc["t_dev_ms"].is<long long>()) return;
 
   const long long ms = doc["t_dev_ms"].as<long long>();
-  if (ms < (long long)kPlausibleEpochS * 1000LL) return;
+  if (!aqua::plausibleEpochMs(ms)) return;
 
   const char* src = doc["t_src"].is<const char*>() ? doc["t_src"].as<const char*>() : "";
   if (strcmp(src, "rtc") == 0) s_broadcastSource = aqua::TimeSource::Rtc;
@@ -181,14 +185,12 @@ static bool commandExpired(const char* payload, size_t length) {
   if (!probe["deadline_ms"].is<long long>()) return false;
 
   const long long deadlineMs = probe["deadline_ms"].as<long long>();
-  if (deadlineMs <= 0) return false;  // no deadline to enforce
 
-  // Uses the same best-known clock as telemetry, so a node with a broker but no internet can
-  // still tell whether a deadline has passed instead of skipping the check entirely.
+  // The rule itself lives in the shared library: whether this command is stale is one decision,
+  // and a copy per node is how the four came to disagree. Only the clock differs per node.
   const uint64_t now = aquaLinkNowMs();
-  if (now == 0) return false;  // nothing anchored: not able to judge
+  if (!aqua::deadlinePassed(deadlineMs, now)) return false;
   const long long nowMs = (long long)now;
-  if (nowMs <= deadlineMs) return false;
 
   const char* cmdId = probe["cmd_id"].is<const char*>() ? probe["cmd_id"].as<const char*>() : "";
   Serial.printf("[AQUA] command %s expired %lld ms ago; rejected\n", cmdId, nowMs - deadlineMs);

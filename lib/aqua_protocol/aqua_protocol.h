@@ -96,6 +96,56 @@ enum class TimeSource : uint8_t {
 
 const char* timeSourceName(TimeSource source);
 
+/**
+ * Epoch seconds below which a clock reading is not a real time: 2020-01-01T00:00:00Z.
+ *
+ * A node whose RTC or SNTP sync failed reports 1970, and a clock that has never been set is
+ * worse than one that admits it. Everything that reads a clock compares against this first, so
+ * the threshold is defined once. The four nodes previously each declared their own copy, and one
+ * of them had drifted to `1600000000` -- which the pump's own comment did not describe, saying
+ * instead that the pre-2020 case is the one reported as `monotonic`.
+ */
+constexpr uint64_t kPlausibleEpochS = 1577836800ULL;
+
+/** @return true when `unixMs` is a plausible epoch-millisecond reading. */
+bool plausibleEpochMs(long long unixMs);
+
+/**
+ * Carry a time broadcast forward by uptime, in epoch milliseconds.
+ *
+ * Tier 3 of `docs/TIME-SYNC.md`: with an AP and a broker but no internet, the retained
+ * `aqua/time` message is the only thing that can say what time it is. Extrapolating from it
+ * keeps samples stamped with something ordered and nearly right, which is a far better answer
+ * than a node stamping every sample 0.
+ *
+ * Takes plain integers rather than reading `millis()` itself, so the arithmetic is testable on
+ * the host — including the wrap, which is invisible until the node has been up for 49 days.
+ *
+ * @param anchorMs    epoch ms from the broadcast
+ * @param anchorAtMs  uptime at which the broadcast arrived
+ * @param nowMs       current uptime
+ */
+uint64_t extrapolateEpochMs(uint64_t anchorMs, uint32_t anchorAtMs, uint32_t nowMs);
+
+/**
+ * Whether a command's deadline has already passed.
+ *
+ * The gateway stamps `deadline_ms` when it issues a command. Acting after it has expired is not
+ * neutral: it moves an actuator for a reason nobody is waiting on any more.
+ *
+ * Two conditions answer "not expired". A deadline of `<= 0` means there is nothing to enforce,
+ * and a clock that is not plausible means this node is in no position to judge. The second is
+ * checked with `plausibleEpochMs` rather than against zero, so a caller cannot disable the check
+ * by passing an unanchored reading that happens not to be exactly 0.
+ *
+ * Shared rather than repeated per node: the four copies had already diverged, and the 256-byte
+ * JSON probe that silently disabled the check on all four had to be corrected four times.
+ *
+ * @param deadlineMs the command's deadline, epoch ms
+ * @param nowMs      best-known epoch ms; implausible values mean "no anchored clock"
+ */
+bool deadlinePassed(long long deadlineMs, uint64_t nowMs);
+
 // ---------------------------------------------------------------------------
 // Topics
 // ---------------------------------------------------------------------------
