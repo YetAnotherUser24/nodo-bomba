@@ -44,11 +44,53 @@ static uint64_t nowUnixMs() {
   return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
 }
 
+/**
+ * Newest `aqua/time` broadcast (`docs/TIME-SYNC.md` tier 3): epoch ms, the uptime it arrived
+ * at, and which clock produced it.
+ *
+ * This node has no RTC and its only other clock is SNTP, so with the internet unreachable it
+ * falls back to `monotonic` even though the AP and broker are up -- which is precisely the case
+ * the design exists for. Keeping the *source* as well as the value means the envelope can go on
+ * saying `rtc` or `ntp` instead of degrading every sample to `monotonic`.
+ */
+uint64_t s_broadcastMs = 0;
+uint32_t s_broadcastAtMs = 0;
+bool s_haveBroadcast = false;
+aqua::TimeSource s_broadcastSource = aqua::TimeSource::Monotonic;
+
+/** Best-known epoch ms, or 0 when nothing is anchored. */
+uint64_t aquaLinkNowMs() {
+  const uint64_t local = nowUnixMs();
+  if (local >= kPlausibleEpochS * 1000ULL) return local;
+  if (s_haveBroadcast) return s_broadcastMs + (uint64_t)(millis() - s_broadcastAtMs);
+  return 0;
+}
+
 static aqua::TimeSource timeSourceNow() {
-  struct timeval tv;
-  gettimeofday(&tv, nullptr);
-  return (uint64_t)tv.tv_sec >= kPlausibleEpochS ? aqua::TimeSource::Ntp
-                                                 : aqua::TimeSource::Monotonic;
+  if (nowUnixMs() >= kPlausibleEpochS * 1000ULL) return aqua::TimeSource::Ntp;
+  if (s_haveBroadcast) return s_broadcastSource;
+  return aqua::TimeSource::Monotonic;
+}
+
+/** Record an `aqua/time` broadcast; ignored unless it is plausible. */
+static void acceptTimeBroadcast(const char* payload, size_t length) {
+  StaticJsonDocument<256> doc;
+  if (deserializeJson(doc, payload, length) != DeserializationError::Ok) return;
+  if (!doc["t_dev_ms"].is<long long>()) return;
+
+  const long long ms = doc["t_dev_ms"].as<long long>();
+  if (ms < (long long)kPlausibleEpochS * 1000LL) return;
+
+  const char* src = doc["t_src"].is<const char*>() ? doc["t_src"].as<const char*>() : "";
+  if (strcmp(src, "rtc") == 0) s_broadcastSource = aqua::TimeSource::Rtc;
+  else if (strcmp(src, "espnow") == 0) s_broadcastSource = aqua::TimeSource::EspNow;
+  else if (strcmp(src, "ntp") == 0) s_broadcastSource = aqua::TimeSource::Ntp;
+  else s_broadcastSource = aqua::TimeSource::Monotonic;
+
+  s_broadcastMs = (uint64_t)ms;
+  s_broadcastAtMs = millis();
+  s_haveBroadcast = true;
+  Serial.printf("[AQUA] time broadcast %lld ms (t_src=%s)\n", ms, src);
 }
 
 /* ------------------------------- Statics ------------------------------- */
@@ -141,10 +183,11 @@ static bool commandExpired(const char* payload, size_t length) {
   const long long deadlineMs = probe["deadline_ms"].as<long long>();
   if (deadlineMs <= 0) return false;  // no deadline to enforce
 
-  struct timeval tv;
-  gettimeofday(&tv, nullptr);
-  const long long nowMs = (long long)tv.tv_sec * 1000LL + (long long)(tv.tv_usec / 1000);
-  if (nowMs < (long long)kPlausibleEpochS * 1000LL) return false;
+  // Uses the same best-known clock as telemetry, so a node with a broker but no internet can
+  // still tell whether a deadline has passed instead of skipping the check entirely.
+  const uint64_t now = aquaLinkNowMs();
+  if (now == 0) return false;  // nothing anchored: not able to judge
+  const long long nowMs = (long long)now;
   if (nowMs <= deadlineMs) return false;
 
   const char* cmdId = probe["cmd_id"].is<const char*>() ? probe["cmd_id"].as<const char*>() : "";
@@ -154,9 +197,16 @@ static bool commandExpired(const char* payload, size_t length) {
 }
 
 static void onMessage(char* topic, uint8_t* payload, unsigned int length) {
-  (void)topic;
-  // Not NUL-terminated by contract. `pumpHandleMqttCommand` is given the length and must
-  // use it; treating this as a C string would read past the end of the buffer.
+  // Not NUL-terminated by contract. The handler is given the length and must use it; treating
+  // this as a C string would read past the end of the buffer.
+  //
+  // Routed by topic, because `aqua/time` is a retained broadcast rather than a command: handing
+  // it to the command handler would have it report "no action" at best, and bury a real time
+  // message in the retained-message noise at worst.
+  if (topic != nullptr && strcmp(topic, aqua::AQUA_TIME_TOPIC) == 0) {
+    acceptTimeBroadcast((const char*)payload, (size_t)length);
+    return;
+  }
   if (commandExpired((const char*)payload, (size_t)length)) return;
   pumpHandleMqttCommand((const char*)payload, (size_t)length);
 }
@@ -188,6 +238,9 @@ static bool connectOnce() {
   if (aqua::commandTopic(aqua::Role::Pump, cmdTopic, sizeof(cmdTopic))) {
     s_mqtt.subscribe(cmdTopic, 1);
   }
+  // Tier 3 of `docs/TIME-SYNC.md`. Retained, so it arrives immediately on subscribe -- if
+  // anything has published it, which is why the node keeps its own SNTP fallback as well.
+  s_mqtt.subscribe(aqua::AQUA_TIME_TOPIC, 1);
 
   // Cleared so the next `loop()` republishes presence for this new session.
   s_presencePublished = false;
@@ -316,9 +369,10 @@ void aquaLinkQueue(const PumpState& state) {
     return;
   }
 
-  struct timeval tv;
-  gettimeofday(&tv, nullptr);
-  const uint64_t ms = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
+  // Best-known clock. Without the broadcast this node degrades to `monotonic` whenever SNTP
+  // cannot reach the internet, even with the AP and broker up -- the case the design exists for.
+  uint64_t ms = aquaLinkNowMs();
+  if (ms == 0) ms = nowUnixMs();
 
   Queued& entry = s_batch[s_queued];
   entry.state = state;
