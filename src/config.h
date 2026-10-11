@@ -6,8 +6,16 @@
 #pragma once
 
 /* ------------------------------- WiFi ------------------------------- */
-#define WIFI_SSID               "WifiDev"
-#define WIFI_PASSWORD           "rpidev24"
+// Guarded so a credential can be injected at build time; see the note in
+// nodo-aerador/src/config.h. An unguarded #define here silently wins over the flag.
+#ifndef AQUA_WIFI_SSID
+#define AQUA_WIFI_SSID          "WifiDev"
+#endif
+#ifndef AQUA_WIFI_PASSWORD
+#define AQUA_WIFI_PASSWORD      "rpidev24"
+#endif
+#define WIFI_SSID               AQUA_WIFI_SSID
+#define WIFI_PASSWORD           AQUA_WIFI_PASSWORD
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 
 /* --------------------------- AquaControl ---------------------------- */
