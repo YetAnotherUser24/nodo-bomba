@@ -277,6 +277,19 @@ class EnvelopeBuilder {
   void setExperiment(const char* experimentId);
 
   /**
+   * Set the per-boot id.
+   *
+   * The constructor takes it, but the value is not known at static-construction time:
+   * `esp_random()` needs the RNG up, so every node constructs the builder with a
+   * placeholder and only learns its real boot id inside `aquaLinkBegin()`. Without this
+   * setter the placeholder (0) is what gets published, which defeats the `(node_id,
+   * boot_id, seq)` idempotency key: after a reboot `seq` restarts at 1 while the gateway
+   * still holds the previous boot's high-water mark, so a clean restart is recorded as an
+   * `out_of_order_batch` anomaly. Must be called before `begin()`.
+   */
+  void setBootId(uint32_t bootId);
+
+  /**
    * Write the envelope prefix.
    *
    * @param sequence monotonic counter for this boot, starting at 1. Together with `bootId` it

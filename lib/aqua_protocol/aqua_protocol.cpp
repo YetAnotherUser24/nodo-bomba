@@ -405,4 +405,6 @@ size_t EnvelopeBuilder::finish(uint64_t tDevMs, TimeSource source, int rssi) {
 
 void EnvelopeBuilder::setExperiment(const char* experimentId) { experiment_ = experimentId; }
 
+void EnvelopeBuilder::setBootId(uint32_t bootId) { bootId_ = bootId; }
+
 }  // namespace aqua
